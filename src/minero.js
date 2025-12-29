@@ -4,7 +4,8 @@ import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { fileURLToPath } from 'url';
 import readline from 'node:readline';
-
+import pkg from 'pg';
+const { Client } = pkg;
 
 // ===================== FUNCIONES =====================
 
@@ -93,22 +94,19 @@ async function mergeAnuncios(nuevosAnuncios) {
   );
 
   let existentes = [];
-
   if (fs.existsSync(rutaArchivo)) {
     existentes = JSON.parse(fs.readFileSync(rutaArchivo, 'utf-8'));
   }
 
-  // Map por ID (preserva estado)
-  const map = new Map(
-    existentes.map(a => [a.id, a])
-  );
+  const map = new Map(existentes.map(x => [x.id, x]));
 
-  // Añadir solo anuncios nuevos
- if (map.has(a.id)) {
-    registrarDuplicado(a);      // JSON local (opcional)
-    await volcarDuplicado(a);   // PostgreSQL
-  } else {
-    map.set(a.id, a);
+  for (const a of nuevosAnuncios) {
+    if (map.has(a.id)) {
+      registrarDuplicado(a);      // JSON
+      await volcarDuplicado(a);   // PostgreSQL
+    } else {
+      map.set(a.id, a);
+    }
   }
 
   fs.writeFileSync(
@@ -152,8 +150,7 @@ function leerNoImportados(limite = 50) {
     .slice(0, limite);
 }
 
-import pkg from 'pg';
-const { Client } = pkg;
+
 
 async function volcarEnPostgres(anuncios) {
   const client = new Client({
@@ -169,7 +166,7 @@ async function volcarEnPostgres(anuncios) {
   for (const a of anuncios) {
     await client.query(
       `
-      INSERT INTO enlaces (id, url, timestamp)
+      INSERT INTO enlaces (id, url, first_seen)
       VALUES ($1, $2, $3)
       ON CONFLICT (id) DO NOTHING
       `,
@@ -269,31 +266,39 @@ const scrollHumano = async (page) => {
 };
 
 const scrollRapidoAbajoYArriba = async (page) => {
-  // ⬇️ BAJAR RÁPIDO
-  while (true) {
-    const bajado = await page.evaluate(() => {
-      const antes = window.scrollY;
-      window.scrollBy(0, 800);
-      return window.scrollY > antes;
-    });
+  try {
+    // ⬇️ BAJAR
+    while (true) {
+      const bajado = await page.evaluate(() => {
+        const antes = window.scrollY;
+        window.scrollBy(0, 800);
+        return window.scrollY > antes;
+      });
 
-    if (!bajado) break;
-    await esperar(80, 160); // rápido
-  }
+      if (!bajado) break;
+      await esperar(80, 160);
+    }
 
-  // ⏸️ mini pausa humana
-  await esperar(300, 600);
+    await esperar(300, 600);
 
-  // ⬆️ SUBIR RÁPIDO
-  while (true) {
-    const subido = await page.evaluate(() => {
-      const antes = window.scrollY;
-      window.scrollBy(0, -800);
-      return window.scrollY < antes;
-    });
+    // ⬆️ SUBIR
+    while (true) {
+      const subido = await page.evaluate(() => {
+        const antes = window.scrollY;
+        window.scrollBy(0, -800);
+        return window.scrollY < antes;
+      });
 
-    if (!subido) break;
-    await esperar(80, 160); // rápido
+      if (!subido) break;
+      await esperar(80, 160);
+    }
+  } catch (e) {
+    // ⚠️ Navegación en curso → ignorar
+    if (e.message.includes('Execution context was destroyed')) {
+      console.log('⚠️ Scroll interrumpido por navegación (normal)');
+      return;
+    }
+    throw e; // otros errores sí importan
   }
 };
 
@@ -375,7 +380,7 @@ const siguientePagina = async (page) => {
 
 puppeteer.use(StealthPlugin());
 
-const BASE_URL ='https://www.fotocasa.es/es/alquiler/viviendas/espana/todas-las-zonas/l/1600';
+const BASE_URL ='https://www.fotocasa.es/es/alquiler/viviendas/espana/todas-las-zonas/l/1';
 const browser = await puppeteer.launch({
 
 headless: false,
@@ -416,7 +421,7 @@ while (true) {
 
   console.log(`📦 Total acumulados: ${anunciosGlobales.size}`);
   // guardar enlaces en archivo json
-  mergeAnuncios(anuncios);
+  await mergeAnuncios(anuncios);
 
   // ⬇️ solo anuncios NUEVOS de esta página
   const pendientes = anuncios.filter(a => a.importado !== true);
